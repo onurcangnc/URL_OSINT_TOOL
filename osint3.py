@@ -1,16 +1,26 @@
+import argparse
 import requests
-from bs4 import BeautifulSoup
 import ssl
 import datetime
 from urllib.parse import urlparse
 import certifi
 import socket
+import re
 from colorama import init, Fore
+import whois
+
 # Initialize colorama
 init()
 
-# Define the target URL
-target_url = "https://www.ctis.bilkent.edu.tr"  # Replace with your target website
+# Create a command-line interface
+parser = argparse.ArgumentParser(description="OSINT Tool")
+parser.add_argument("--target-url", required=True, help="Target URL for OSINT")
+args = parser.parse_args()
+
+# Check if "http://" or "https://" is missing, and prepend it if necessary
+target_url = args.target_url
+if not target_url.startswith("http://") and not target_url.startswith("https://"):
+    target_url = "http://" + target_url
 
 # Suppress SSL certificate verification warnings
 ssl._create_default_https_context = ssl._create_unverified_context
@@ -18,28 +28,36 @@ ssl._create_default_https_context = ssl._create_unverified_context
 # Send an HTTP GET request to the target URL
 response = requests.get(target_url, verify=certifi.where())
 
+# Function to colorize links based on accessibility
+def colorize_link(link, color):
+    return f"{color}{link}{Fore.RESET}"
+
 # Check if the request was successful (status code 200)
 if response.status_code == 200:
-    # Parse the HTML content of the page using BeautifulSoup
-    soup = BeautifulSoup(response.content, 'html.parser')
-
     # Extract and print the page title
-    page_title = soup.title.string
-    print(f"Page Title: {page_title}")
+    page_title = re.search(r'<title>(.*?)</title>', response.text)
+    if page_title:
+        print(f"Page Title: {page_title.group(1)}")
 
     # Extract and print meta description (if available)
-    meta_description = soup.find("meta", {"name": "description"})
+    meta_description = re.search(r'<meta name="description" content="(.*?)"', response.text)
     if meta_description:
-        print(f"Meta Description: {meta_description['content']}")
+        print(f"Meta Description: {meta_description.group(1)}")
 
     # Extract and print all the links on the page
-    links = soup.find_all("a")
+    links = re.findall(r'href=["\'](https?://(?:www\.)?[^"\']+)["\']', response.text)
     if links:
         print("Links on the Page:")
         for link in links:
-            href = link.get("href")
-            if href:
-                print(href)
+            try:
+                link_response = requests.get(link, verify=certifi.where())
+                if link_response.status_code == 200:
+                    print(colorize_link(link, Fore.GREEN))
+                else:
+                    print(colorize_link(link, Fore.RED))
+            except Exception as e:
+                print(colorize_link(link, Fore.RED))
+                continue
 
     # Extract and print HTTP headers
     headers = response.headers
@@ -48,33 +66,24 @@ if response.status_code == 200:
         print(f"{key}: {value}")
 
     # Save image URLs to a text file
-    images = soup.find_all("img")
+    images = re.findall(r'src=["\'](https?://[^"\']+\.(?:jpg|png|gif))["\']', response.text)
     if images:
         print("Image URLs:")
         with open("image_urls.txt", "w") as file:
             for img in images:
-                src = img.get("src")
-                if src:
-                    print(src)
-                    file.write(src + "\n")
-
-    # Extract and print text content of the page (excluding HTML tags)
-    text_content = soup.get_text()
-    print("Text Content:")
-    print(text_content)
+                print(img)
+                file.write(img + "\n")
 
     # Identify and print HTML forms on the page
-    forms = soup.find_all("form")
+    forms = re.findall(r'<form.*?</form>', response.text, re.DOTALL)
     if forms:
         print("HTML Forms:")
         for form in forms:
-            form_fields = form.find_all("input")
+            form_fields = re.findall(r'<input.*?name=["\'](.*?)["\']', form)
             if form_fields:
                 print("Form Fields:")
-                for field in form_fields:
-                    field_name = field.get("name")
-                    if field_name:
-                        print(f"Field Name: {field_name}")
+                for field_name in form_fields:
+                    print(f"Field Name: {field_name}")
 
     # Get and print IP address of the target server
     try:
@@ -96,6 +105,8 @@ if response.status_code == 200:
         print(f"Issued By: {cert_issuer['commonName']}")
         print(f"Valid From: {cert_start_date}")
         print(f"Valid Until: {cert_end_date}")
+    except ConnectionRefusedError as e:
+        print(f"Failed to establish a connection to the HTTPS port (443): {str(e)}")
     except Exception as e:
         print(f"Failed to retrieve HTTPS certificate information: {str(e)}")
 
@@ -104,3 +115,25 @@ if response.status_code == 200:
     domain_info = parsed_url.netloc.split(":")[0]
     print("\nDomain Information:")
     print(f"Domain: {domain_info}")
+
+    # Perform a Whois lookup for domain registration information
+    try:
+        domain_info = whois.whois(domain_info)
+        print("\nWhois Information:")
+        print(f"Domain Name: {domain_info.domain_name}")
+        print(f"Registrar: {domain_info.registrar}")
+        print(f"Registrant Name: {domain_info.name}")
+        print(f"Registrant Email: {domain_info.email}")
+        print(f"Registration Date: {domain_info.creation_date}")
+    except Exception as e:
+        print(f"Failed to retrieve Whois information: {str(e)}")
+
+    # Extract and print social media links using regular expressions
+    social_media_links = re.findall(r'href=["\'](https?://(?:www\.)?(facebook|twitter|linkedin)\.[a-z]+)/?["\']', response.text, re.IGNORECASE)
+    if social_media_links:
+        print("Social Media Links:")
+        for link, platform in social_media_links:
+            print(f"{platform.capitalize()}: {link}")
+
+else:
+    print(f"Failed to retrieve the webpage. Status code: {response.status_code}")
